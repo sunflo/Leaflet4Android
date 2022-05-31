@@ -1,0 +1,55 @@
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+#map {
+    width: 600px;
+    height: 400px;
+}
+
+
+body {
+    padding: 0;
+    margin: 0;
+}
+
+#map {
+    height: 100%;
+    width: 100vw;
+}
+
+#debug_info {
+    width: 60%;
+    position: absolute;
+    bottom: 10px;
+    max-height: 200px;
+    overflow: scroll;
+    left: 10px;
+    z-index: 999;
+    font-size: xx-small;
+    white-space: normal;
+    word-break: break-all;
+    word-wrap: break-word;
+}
+
+.leaflet-div-icon {
+    background: none;
+    border: 0;
+}
+
+.cluster {
+    float: left;
+    padding: 0;
+    color: white;
+    margin: 0;
+    text-align: center;
+    list-style: none;
+}
+
+.leaflet-right{
+	visibility: hidden;
+}
+	
+
