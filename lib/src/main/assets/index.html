@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Android Map Via Leaflet</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" type="text/css" href="./css/leaflet.css"/>
+    <link rel="stylesheet" type="text/css" href="./css/droid.css"/>
+    <script src="./script/leaflet.js"></script>
+    <script src="./script/klog.js"></script>
+    <script src="./script/dsbridge.js"></script>
+    <script src="./script/leaflet-tilelayer-wmts.js"></script>
+    <script src="./script/base64.min.js"></script>
+    <script src="./script/proj4.js"></script>
+    <script src="./script/proj4leaflet.js"></script>
+    <script src="./script/esri-leaflet.js"></script>
+    <script src="./script/esri-leaflet-vector.js"></script>
+    <script src="./script/umd-polyfill.js"></script>
+    <script src="./script/heatmap.min.js"></script>
+    <script src="./script/leaflet-heatmap.js"></script>
+</head>
+<body>
+<div id='map'>
+</div>
+<div id='debug_info'>hello_leaflet</div>
+<script>
+    const allMarkers = new Map();
+    const imageResCache = new Map();
+    let map;
+
+    dsBridge.register("initParams", function (param) {
+        klog(param)
+        let cfg = JSON.parse(decodeURIComponent(param))
+        if (!cfg.show) {
+            document.getElementById("debug_info").style.display = "none"
+        }
+
+        let min = 3
+        if (cfg.minZoom) {
+            min = cfg.minZoom
+        }
+        let max = 17
+        if (cfg.maxZoom) {
+            max = cfg.maxZoom
+        }
+        map = L.map('map', {
+            center: [cfg.lat, cfg.lng],
+            zoom: cfg.zoom,
+            minZoom: min,
+            maxZoom: max,
+            zoomControl: false,
+            bounceAtZoomLimits: false,
+            crs: assembleCrs(cfg)
+        }).setView([cfg.lat, cfg.lng], cfg.zoom);
+        map.whenReady(function (e) {
+            dsBridge.call("view.ready",
+                ["greetings from leaflet！",
+                    e.target._zoom,
+                    e.target.getBounds().getWest(),
+                    e.target.getBounds().getNorth(),
+                    e.target.getBounds().getEast(),
+                    e.target.getBounds().getSouth(),
+                    e.target.getBounds().getCenter().lat,
+                    e.target.getBounds().getCenter().lng
+                ])
+            allocateCallback()
+        });
+
+    })
+
+    function assembleCrs(cfg) {
+        let crs = L.CRS.EPSG3857
+        if (cfg.epsg.name && cfg.epsg.name === "EPSG:4326") {
+            crs = L.CRS.EPSG4326
+        }
+        if (cfg.epsg.resolution && cfg.epsg.origin) {
+            crs = new L.Proj.CRS(cfg.epsg.name, cfg.epsg.param, {
+                origin: cfg.epsg.origin,
+                resolutions: cfg.epsg.resolution
+            })
+        }
+        return crs
+    }
+
+    /**
+     * 注册订阅事件，如zoom camera 改变事件，用于通知原生层
+     * **/
+    function allocateCallback() {
+        let _cameraChange = function (tag, e) {
+            if (e.target._zoom === Infinity) return
+            dsBridge.call("map.onMapCameraChange",
+                [tag,
+                    e.target._zoom,
+                    e.target.getBounds().getWest(),
+                    e.target.getBounds().getNorth(),
+                    e.target.getBounds().getEast(),
+                    e.target.getBounds().getSouth(),
+                    e.target.getBounds().getCenter().lat,
+                    e.target.getBounds().getCenter().lng,
+                ])
+        }
+        map.on({
+            zoomlevelschange: function (e) {
+                _cameraChange("mapInit", e)
+            },
+            movestart: function (e) {
+                _cameraChange("moveStart", e)
+            },
+            move: function (e) {
+                _cameraChange("moving", e)
+            },
+            moveend: function (e) {
+                _cameraChange("moveEnd", e)
+            }
+
+        });
+    }
+
+    /**
+     *组装坐标系原点的转换数组
+     ***/
+    function assembleMatrixIds(m) {
+        const defaultMatrix = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+        let origin = (map.options.crs.options && map.options.crs.options.origin) || [-180, 90]
+        const rawMatrix = m || defaultMatrix;
+        let matrixIds = new Array(rawMatrix.length)
+        for (let i = 0; i < rawMatrix.length; i++) {
+            matrixIds[i] = {
+                identifier: "" + rawMatrix[i],
+                topLeftCorner: new L.LatLng(origin[1], origin[0])
+            };
+        }
+        return matrixIds
+    }
+
+    dsBridge.register("crs", function (name, param, origin, resolution) {
+        let crs = L.CRS.EPSG3857
+        if (name && name === "EPSG:4326") {
+            crs = L.CRS.EPSG4326
+        }
+        if (resolution && origin) {
+            crs = new L.Proj.CRS(name, param, {
+                origin: origin,
+                resolutions: resolution
+            })
+        }
+        map.options.crs = crs
+    })
+
+    dsBridge.register("async", {
+        tag: "async",
+        getZoom: function () {
+            return map.getZoom();
+        }
+    })
+
+    dsBridge.register('addLayer', function (type, tileJson) {
+        klog(tileJson)
+        let tile = JSON.parse(tileJson)
+        //TMS
+        if (type === 0) {
+            L.tileLayer(tile.url, {
+                maxZoom: tile.maxZoom,
+                minZoom: tile.minZoom,
+                attribution: tile.attribution,
+                id: tile.id,
+                tileSize: tile.tileSize,
+                zoomOffset: tile.offset,
+                errorTileUrl: tile.errorTileUrl,
+            }).addTo(map);
+        } else if (type === 1) {
+            //WMTS
+            var ign = new L.TileLayer.WMTS(tile.url,
+                {
+                    layer: tile.layer,
+                    style: tile.style,
+                    maxZoom: tile.maxZoom,
+                    minZoom: tile.minZoom,
+                    tilematrixSet: tile.matrixSet,
+                    errorTileUrl: tile.errorTileUrl,
+                    format: tile.format,
+                    matrixIds: assembleMatrixIds(tile.matrixIds)
+                }
+            );
+            map.addLayer(ign);
+
+        } else if (type === 2) {
+            //ARCGIS
+            L.esri.dynamicMapLayer({
+                url: tile.url,
+                maxZoom: tile.maxZoom,
+                minZoom: tile.minZoom,
+                token: tile.arcGisToken,
+                zIndex: tile.zIndex
+            }).addTo(map);
+        } else if (type === 3) {
+            //WMS
+            let option = {
+                uppercase: true,
+                matrixIds: tile.matrixIds
+            }
+            if (tile.params) {
+                Object.keys(tile.params).forEach(
+                    (key, index) => {
+                        option[key.toLowerCase()] = tile.params[key]
+                    }
+                )
+            }
+            L.tileLayer.wms(
+                tile.url,
+                option).addTo(map);
+        }
+    })
+
+    let heatmapLayer;
+    dsBridge.registerAsyn("heatMap", {
+        tag: "heatMap",
+        add: function (points, option) {
+            let cfg = {
+                "radius": 3,
+                "maxOpacity": .7,
+                "scaleRadius": false,
+                "useLocalExtrema": false,
+                latField: 'lat',
+                lngField: 'lng',
+                valueField: 'count'
+            };
+            let allData = new Array(points.length)
+            for (let i = 0; i < points.length; i++) {
+                let p = points[i]
+                allData[i] = {
+                    lat: p[0],
+                    lng: p[1],
+                    count: 1
+                }
+            }
+            let heatData = {
+                max: 3,
+
+                data: allData
+            };
+
+            heatmapLayer = new HeatmapOverlay(cfg);
+            map.addLayer(heatmapLayer)
+            heatmapLayer.setData(heatData)
+        },
+        remove: function () {
+            if(heatmapLayer){
+                map.removeLayer(heatmapLayer)
+            }
+        }
+    })
+
+
+    dsBridge.registerAsyn("polyline", {
+        tag: "polyline",
+        add: function (config, resp) {
+            klog(config)
+            let pline = JSON.parse(config)
+            let id = pline.elementId
+            let geometry = pline.geometry
+            let line = L.polyline(geometry,
+                {
+                    color: pline.color,
+                    weight: pline.weight,
+                    opacity: pline.opacity
+                }
+            ).addTo(map);
+            allMarkers.set(id, line);
+            resp("polyline")
+        },
+        remove: function (id, resp) {
+            klog(id)
+            if (allMarkers.has(id)) {
+                allMarkers.get(id).remove()
+                allMarkers.delete(id)
+                resp(true)
+            } else {
+                resp(false)
+            }
+
+        }
+    })
+
+    dsBridge.registerAsyn("polygon", {
+        tag: "polygon",
+        add: function (config, resp) {
+            klog(config)
+            let polygon = JSON.parse(config)
+            let id = polygon.elementId
+            let geometry = polygon.geometry
+            let gon = L.polygon(geometry,
+                {
+                    stroke: true,
+                    color: polygon.color,
+                    weight: polygon.weight,
+                    fillOpacity: polygon.opacity,
+                    fillColor: polygon.solidColor
+                }
+            ).addTo(map);
+            allMarkers.set(id, gon);
+            resp("polygon")
+        },
+        remove: function (id, resp) {
+            klog(id)
+            if (allMarkers.has(id)) {
+                allMarkers.get(id).remove()
+                allMarkers.delete(id)
+                resp(true)
+            } else {
+                resp(false)
+            }
+
+        }
+    })
+
+    function onMarkerClicked(e) {
+        let markerId = e.target.options.alt
+        dsBridge.call("map.onMarkerClick", markerId)
+    }
+
+    dsBridge.registerAsyn("marker", {
+        tag: "marker",
+        bind: function (id, img) {
+            imageResCache.set(id, img)
+        },
+        add: function (markerConfig, resp) {
+            klog(markerConfig)
+            let config = JSON.parse(markerConfig)
+            let markerId = config.markerId
+            let iconId = /*"data:image/png;base64," +*/ config.image
+            let offset = config.iconOffSet
+            let iconHtml;
+            if (iconId.startsWith("cluster")) {
+                let sp = iconId.split("@")
+                let count = sp[1]
+                let color = sp[2]
+                iconHtml = '<div id="container" class="cluster" style="font-size: ' + config.height / 2 + 'px; height: ' + config.height * 2 + 'px;width: ' + config.width * 2 + 'px;line-height: ' + config.height * 2 + 'px;background: ' + color + ';border-radius: ' + config.height + 'px;-moz-border-radius: ' + config.height + 'px;-webkit-border-radius: ' + config.height + 'px;">' + count + '</div>'
+            } else if (iconId.startsWith("data:image/png;base64")) {
+                iconHtml = '<img alt="marker-custom-icon" src=' + iconId + ' width="' + config.width + '"/>'
+            } else {
+                let image = imageResCache.get(iconId)
+                iconHtml = '<img alt="marker-custom-icon" src=' + image + ' width="' + config.width + '"/>'
+            }
+            let marker = L.marker([config.lat, config.lng], {
+                    opacity: config.opacity,
+                    zIndexOffset: config.zIndex,
+                    icon: L.divIcon({
+                        iconAnchor: [config.width * offset[0], config.height * offset[1]],
+                        html: iconHtml
+                    }),
+                    alt: markerId
+                }
+            )
+            marker.on('click', onMarkerClicked)
+            marker.addTo(map)
+            allMarkers.set(markerId, marker)
+            resp(markerId)
+        },
+        remove: function (markerConfig, resp) {
+            klog(markerConfig)
+            let config = JSON.parse(markerConfig)
+            let markerId = config.markerId
+            if (allMarkers.has(markerId)) {
+                allMarkers.get(markerId).remove()
+                allMarkers.delete(markerId)
+                resp(markerId)
+            } else {
+                resp("marker[ " + markerId + " ] not exist")
+            }
+
+        }
+    })
+    dsBridge.register("projection", {
+        tag: "projection",
+        toPoint: function (lat, lng) {
+            let p = map.latLngToContainerPoint([lat, lng])
+            return [p.x, p.y];
+        },
+        fromPoint: function (x, y) {
+            let p = map.containerPointToLatLng([x, y])
+            return [p.lat, p.lng]
+        }
+    })
+
+
+    dsBridge.register("addOnMapClickListener", function () {
+        // klog("add_map_mapClick");
+        map.on('click', function (e) {
+            dsBridge.call("map.onMapClick", [e.latlng.lat, e.latlng.lng])
+        });
+    })
+
+    dsBridge.register("removeMapClickListener", function () {
+        klog("remove_map_mapClick");
+        map.off('click');
+    })
+    dsBridge.register("addOnMapLongClickListener", function () {
+        map.on('contextmenu', function (e) {
+            dsBridge.call("map.onMapLongClick", [e.latlng.lat, e.latlng.lng])
+        });
+    })
+
+    dsBridge.register("removeMapLongClickListener", function () {
+        map.off('contextmenu');
+    })
+
+    ///mapcontrol
+    dsBridge.register("moveCamera", function (lat, lng, animate, zoom) {
+        map.panTo([lat, lng], {
+            animate: animate,
+            duration: 0.5
+        })
+        // if (zoom !== 0) {
+        //     map.setZoom(zoom)
+        // }
+    })
+
+    dsBridge.register("translate", function (x, y, animate) {
+        map.panBy([x, y], {
+            animate: animate,
+            duration: 0.5
+        })
+    })
+
+    dsBridge.register("zoomTo", function (zoom) {
+        map.setZoom(zoom)
+    })
+    dsBridge.register('zoomIn', function () {
+        map.zoomIn();
+    })
+    dsBridge.register('zoomOut', function () {
+        map.zoomOut();
+    })
+
+    /*####################以下为测试调试用代码########################*/
+    function addMarker(lat, lng) {
+        L.marker([lat, lng]
+            , {
+                icon: L.icon({
+                    iconUrl: 'pin.png',
+                    iconSize: [48, 48],
+                    iconAnchor: [24, 48]
+                })
+            }
+        ).addTo(map);
+    }
+
+
+    function randomLatlng() {
+        var MinLon = 120.3993168;
+        var MaxLon = 121.1565548;
+        var MinLat = 31.0327868;
+        var MaxLat = 31.4497358;
+
+        var randomLon = Math.random() * (MaxLon - MinLon) + MinLon;
+        var randomLat = Math.random() * (MaxLat - MinLat) + MinLat;
+
+        return L.latLng(randomLat, randomLon);
+    }
+
+    function addDivMarker() {
+        let marker = L.marker(randomLatlng()
+            , {
+                icon: L.divIcon({
+                    html: '<img src="github-round.png"/>'
+                })
+            }
+        )
+        marker.on('click', onMarkerClicked)
+        marker.addTo(map);
+    }
+
+
+</script>
+
+
+</body>
+</html>
