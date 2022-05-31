@@ -1,6 +1,5 @@
 # LeafletDroid
 
-------
 
 Leaflet SDK for android platform
 
